@@ -1,8 +1,11 @@
 """Focused tests for macOS system LaunchDaemon gateway support."""
 
 import plistlib
+import pwd
 from pathlib import Path
 from types import SimpleNamespace
+
+import pytest
 
 import hermes_cli.gateway as gateway_cli
 
@@ -224,3 +227,165 @@ def test_gateway_install_routes_system_flag_to_launchdaemon(monkeypatch):
     )
 
     assert calls == [(True, True, "alice")]
+
+
+def test_launchdaemon_install_rejects_existing_launchagent(
+    tmp_path, monkeypatch, capsys
+):
+    target_home = tmp_path / "alice"
+    user_plist = target_home / "Library" / "LaunchAgents" / "ai.hermes.gateway.plist"
+    user_plist.parent.mkdir(parents=True)
+    user_plist.write_text("plist", encoding="utf-8")
+    daemon_plist = tmp_path / "LaunchDaemons" / "ai.hermes.daemon.plist"
+
+    monkeypatch.setattr(
+        gateway_cli, "get_launchd_daemon_plist_path", lambda: daemon_plist
+    )
+    monkeypatch.setattr(
+        gateway_cli, "_require_root_for_system_service", lambda _action: None
+    )
+    monkeypatch.setattr(
+        gateway_cli,
+        "_system_service_identity",
+        lambda run_as_user=None: ("alice", "staff", str(target_home)),
+    )
+
+    with pytest.raises(SystemExit, match="1"):
+        gateway_cli.launchd_install(system=True, run_as_user="alice")
+
+    output = capsys.readouterr().out
+    assert "Cannot install the system LaunchDaemon" in output
+    assert "gateway uninstall" in output
+
+
+def test_installed_launchd_scopes_find_daemon_target_users_agent(tmp_path, monkeypatch):
+    target_home = tmp_path / "alice"
+    user_plist = target_home / "Library" / "LaunchAgents" / "ai.hermes.gateway.plist"
+    daemon_plist = tmp_path / "LaunchDaemons" / "ai.hermes.daemon.plist"
+    user_plist.parent.mkdir(parents=True)
+    daemon_plist.parent.mkdir()
+    user_plist.write_text("plist", encoding="utf-8")
+    daemon_plist.write_bytes(
+        plistlib.dumps({
+            "Label": "ai.hermes.daemon",
+            "ProgramArguments": ["hermes", "gateway", "run"],
+            "UserName": "alice",
+        })
+    )
+
+    monkeypatch.setattr(
+        gateway_cli,
+        "get_launchd_plist_path",
+        lambda: tmp_path / "root" / "Library" / "LaunchAgents" / "missing.plist",
+    )
+    monkeypatch.setattr(
+        gateway_cli, "get_launchd_daemon_plist_path", lambda: daemon_plist
+    )
+    monkeypatch.setattr(
+        pwd,
+        "getpwnam",
+        lambda _username: SimpleNamespace(pw_dir=str(target_home)),
+    )
+
+    assert gateway_cli.get_installed_launchd_scopes() == ["user", "system"]
+
+
+def test_launchagent_install_rejects_existing_launchdaemon(
+    tmp_path, monkeypatch, capsys
+):
+    user_plist = tmp_path / "LaunchAgents" / "ai.hermes.gateway.plist"
+    daemon_plist = tmp_path / "LaunchDaemons" / "ai.hermes.daemon.plist"
+    daemon_plist.parent.mkdir()
+    daemon_plist.write_text("plist", encoding="utf-8")
+
+    monkeypatch.setattr(gateway_cli, "get_launchd_plist_path", lambda: user_plist)
+    monkeypatch.setattr(
+        gateway_cli, "get_launchd_daemon_plist_path", lambda: daemon_plist
+    )
+
+    with pytest.raises(SystemExit, match="1"):
+        gateway_cli.launchd_install()
+
+    output = capsys.readouterr().out
+    assert "Cannot install the user LaunchAgent" in output
+    assert "gateway uninstall --system" in output
+
+
+def test_launchd_scope_selection_uses_only_installed_scope(tmp_path, monkeypatch):
+    user_plist = tmp_path / "LaunchAgents" / "ai.hermes.gateway.plist"
+    daemon_plist = tmp_path / "LaunchDaemons" / "ai.hermes.daemon.plist"
+    daemon_plist.parent.mkdir()
+    daemon_plist.write_text("plist", encoding="utf-8")
+
+    monkeypatch.setattr(gateway_cli, "get_launchd_plist_path", lambda: user_plist)
+    monkeypatch.setattr(
+        gateway_cli, "get_launchd_daemon_plist_path", lambda: daemon_plist
+    )
+
+    assert gateway_cli._select_launchd_scope() is True
+    assert gateway_cli._select_launchd_scope(system=True) is True
+
+    user_plist.parent.mkdir()
+    user_plist.write_text("plist", encoding="utf-8")
+    assert gateway_cli._select_launchd_scope() is False
+
+
+def test_launchd_conflict_warning_identifies_duplicate_supervisors(
+    tmp_path, monkeypatch, capsys
+):
+    user_plist = tmp_path / "LaunchAgents" / "ai.hermes.gateway.plist"
+    daemon_plist = tmp_path / "LaunchDaemons" / "ai.hermes.daemon.plist"
+    user_plist.parent.mkdir()
+    daemon_plist.parent.mkdir()
+    user_plist.write_text("plist", encoding="utf-8")
+    daemon_plist.write_text("plist", encoding="utf-8")
+
+    monkeypatch.setattr(gateway_cli, "get_launchd_plist_path", lambda: user_plist)
+    monkeypatch.setattr(
+        gateway_cli, "get_launchd_daemon_plist_path", lambda: daemon_plist
+    )
+    monkeypatch.setattr(gateway_cli, "_profile_arg", lambda: "")
+
+    gateway_cli.print_launchd_scope_conflict_warning()
+
+    output = capsys.readouterr().out
+    assert "Both a user LaunchAgent and system LaunchDaemon" in output
+    assert "ports, messaging connections, and shared runtime files" in output
+    assert "gateway uninstall --system" in output
+
+
+def test_launchd_restart_auto_selects_system_only_install(tmp_path, monkeypatch):
+    user_plist = tmp_path / "LaunchAgents" / "ai.hermes.gateway.plist"
+    daemon_plist = tmp_path / "LaunchDaemons" / "ai.hermes.daemon.plist"
+    daemon_plist.parent.mkdir()
+    daemon_plist.write_text("plist", encoding="utf-8")
+    calls = []
+
+    monkeypatch.setattr(gateway_cli, "get_launchd_plist_path", lambda: user_plist)
+    monkeypatch.setattr(
+        gateway_cli, "get_launchd_daemon_plist_path", lambda: daemon_plist
+    )
+    monkeypatch.setattr(
+        gateway_cli,
+        "_require_root_for_system_service",
+        lambda action: calls.append(("root", action)),
+    )
+    monkeypatch.setattr(
+        gateway_cli,
+        "_refresh_launchd_plist_for_scope",
+        lambda system: calls.append(("refresh", system)) or False,
+    )
+    monkeypatch.setattr(gateway_cli, "_launchd_system_pid", lambda _label: None)
+    monkeypatch.setattr(
+        gateway_cli.subprocess,
+        "run",
+        lambda command, **_kwargs: (
+            calls.append(("run", command))
+            or SimpleNamespace(returncode=0, stdout="", stderr="")
+        ),
+    )
+
+    gateway_cli.launchd_restart()
+
+    assert calls[:2] == [("root", "restart"), ("refresh", True)]
+    assert ("run", ["launchctl", "kickstart", "-k", "system/ai.hermes.daemon"]) in calls

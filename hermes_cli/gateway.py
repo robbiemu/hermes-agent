@@ -1363,6 +1363,7 @@ def get_gateway_runtime_snapshot(system: bool = False) -> GatewayRuntimeSnapshot
         )
 
     if is_macos():
+        system = _select_launchd_scope(system)
         scope_label = "system LaunchDaemon" if system else "user LaunchAgent"
         return GatewayRuntimeSnapshot(
             manager=f"launchd ({scope_label})",
@@ -2493,11 +2494,28 @@ def get_launchd_plist_path(system: bool = False) -> Path:
     Profile ``~/.hermes/profiles/coder`` → ``ai.hermes.gateway-coder.plist``.
     """
     if system:
-        return Path("/Library/LaunchDaemons") / f"{get_launchd_label(system=True)}.plist"
+        return get_launchd_daemon_plist_path()
 
     suffix = _profile_suffix()
     name = f"ai.hermes.gateway-{suffix}" if suffix else "ai.hermes.gateway"
     return _launchd_user_home() / "Library" / "LaunchAgents" / f"{name}.plist"
+
+
+def get_launchd_daemon_plist_path() -> Path:
+    """Return the system LaunchDaemon plist path for the current profile."""
+    return Path("/Library/LaunchDaemons") / f"{get_launchd_label(system=True)}.plist"
+
+
+def get_launchd_user_plist_path(user_home: str | Path | None = None) -> Path:
+    """Return the current profile's LaunchAgent path for a specific user."""
+    if user_home is None:
+        return get_launchd_plist_path()
+    return (
+        Path(user_home)
+        / "Library"
+        / "LaunchAgents"
+        / f"{get_launchd_label()}.plist"
+    )
 
 
 def _detect_venv_dir() -> Path | None:
@@ -3639,6 +3657,108 @@ def _launchd_domain_for_scope(system: bool) -> str:
     return _launchd_domain(system=True) if system else _launchd_domain()
 
 
+def get_installed_launchd_scopes() -> list[str]:
+    """Return installed launchd scopes for the current Hermes profile."""
+    scopes = []
+    user_plist = get_launchd_user_plist_path()
+    daemon_plist = get_launchd_daemon_plist_path()
+    if daemon_plist.exists():
+        # Under sudo, the default user plist path resolves beneath root's
+        # home. Inspect the daemon's configured UserName so status/conflict
+        # checks still find the target user's LaunchAgent.
+        daemon_user = _read_launchd_run_as_user(daemon_plist)
+        if daemon_user:
+            try:
+                import pwd
+
+                user_plist = get_launchd_user_plist_path(
+                    pwd.getpwnam(daemon_user).pw_dir
+                )
+            except (ImportError, KeyError, OSError):
+                pass
+    if user_plist.exists():
+        scopes.append("user")
+    if daemon_plist.exists():
+        scopes.append("system")
+    return scopes
+
+
+def has_conflicting_launchd_services() -> bool:
+    return len(get_installed_launchd_scopes()) > 1
+
+
+def _select_launchd_scope(system: bool = False) -> bool:
+    """Select the only installed scope, defaulting to user when ambiguous."""
+    if system:
+        return True
+    if get_launchd_plist_path().exists():
+        return False
+    return get_launchd_daemon_plist_path().exists()
+
+
+def _launchd_command_prefix(*, sudo: bool = False) -> str:
+    profile_arg = _profile_arg()
+    command = f"hermes {profile_arg}".strip()
+    return f"sudo {command}" if sudo else command
+
+
+def print_launchd_scope_conflict_warning() -> None:
+    """Explain how to resolve an existing same-profile scope conflict."""
+    if not has_conflicting_launchd_services():
+        return
+    print_warning(
+        "Both a user LaunchAgent and system LaunchDaemon are installed "
+        "for this profile."
+    )
+    print_info(
+        "  Two supervisors can compete for ports, messaging connections, "
+        "and shared runtime files."
+    )
+    print_info(
+        "  Default gateway commands target the user service unless you pass --system."
+    )
+    print_info("  Keep one of these:")
+    print_info(f"    {_launchd_command_prefix()} gateway uninstall")
+    print_info(
+        f"    {_launchd_command_prefix(sudo=True)} gateway uninstall --system"
+    )
+
+
+def _guard_launchd_install_scope(
+    system: bool, *, target_user_home: str | Path | None = None
+) -> None:
+    """Refuse installing two supervisors for the same Hermes profile."""
+    other_system = not system
+    other_path = (
+        get_launchd_daemon_plist_path()
+        if other_system
+        else get_launchd_user_plist_path(target_user_home)
+    )
+    if not other_path.exists():
+        return
+
+    target = "system LaunchDaemon" if system else "user LaunchAgent"
+    other = "user LaunchAgent" if system else "system LaunchDaemon"
+    print_error(
+        f"Cannot install the {target}: a {other} already exists for this profile."
+    )
+    print(
+        "  Running both scopes can start duplicate gateways that share ports, "
+        "messaging connections, and runtime files."
+    )
+    print()
+    print("  Remove the existing service first:")
+    if other_system:
+        print(
+            f"    {_launchd_command_prefix(sudo=True)} gateway uninstall --system"
+        )
+    else:
+        print(f"    {_launchd_command_prefix()} gateway uninstall")
+    print()
+    print("  Then retry this installation.")
+    raise SystemExit(1)
+
+
 def _launchd_plist_is_current_for_scope(system: bool) -> bool:
     return launchd_plist_is_current(system=True) if system else launchd_plist_is_current()
 
@@ -4327,10 +4447,13 @@ def launchd_install(
     if system:
         _require_root_for_system_service("install")
         username, _group_name, target_home = _system_service_identity(run_as_user)
+        _guard_launchd_install_scope(system, target_user_home=target_home)
         run_as_user = username
         _prepare_system_launchd_log_dir(
             username, Path(_hermes_home_for_target_user(target_home)) / "logs"
         )
+    else:
+        _guard_launchd_install_scope(system)
 
     plist_path = _launchd_plist_path_for_scope(system)
 
@@ -4384,6 +4507,7 @@ def launchd_install(
 
 
 def launchd_uninstall(system: bool = False):
+    system = _select_launchd_scope(system)
     if system:
         _require_root_for_system_service("uninstall")
     plist_path = _launchd_plist_path_for_scope(system)
@@ -4402,6 +4526,7 @@ def launchd_uninstall(system: bool = False):
 
 
 def launchd_start(system: bool = False):
+    system = _select_launchd_scope(system)
     if system:
         _require_root_for_system_service("start")
     plist_path = _launchd_plist_path_for_scope(system)
@@ -4470,6 +4595,7 @@ def launchd_start(system: bool = False):
 
 
 def launchd_stop(system: bool = False):
+    system = _select_launchd_scope(system)
     if system:
         _require_root_for_system_service("stop")
     label = _launchd_label_for_scope(system)
@@ -4594,6 +4720,7 @@ def _wait_for_launchd_system_relaunch(
 
 
 def launchd_restart(system: bool = False):
+    system = _select_launchd_scope(system)
     if system:
         _require_root_for_system_service("restart")
         _refresh_launchd_plist_for_scope(True)
@@ -4691,6 +4818,10 @@ def launchd_restart(system: bool = False):
 
 
 def launchd_status(deep: bool = False, system: bool = False):
+    system = _select_launchd_scope(system)
+    if has_conflicting_launchd_services():
+        print_launchd_scope_conflict_warning()
+        print()
     plist_path = _launchd_plist_path_for_scope(system)
     label = _launchd_label_for_scope(system)
     if system:
@@ -5774,7 +5905,7 @@ def _is_service_installed() -> bool:
             or get_systemd_unit_path(system=True).exists()
         )
     elif is_macos():
-        return get_launchd_plist_path().exists()
+        return bool(get_installed_launchd_scopes())
     elif is_windows():
         from hermes_cli import gateway_windows
 
@@ -5817,17 +5948,10 @@ def _is_service_running() -> bool:
                 pass
 
         return False
-    elif is_macos() and get_launchd_plist_path().exists():
-        try:
-            result = subprocess.run(
-                ["launchctl", "list", get_launchd_label()],
-                capture_output=True,
-                text=True,
-                timeout=10,
-            )
-            return result.returncode == 0
-        except subprocess.TimeoutExpired:
-            return False
+    elif is_macos() and get_installed_launchd_scopes():
+        return _probe_launchd_service_running(
+            system=_select_launchd_scope()
+        )
     elif is_windows():
         from hermes_cli import gateway_windows
 
@@ -6398,6 +6522,10 @@ def gateway_setup():
 
     if supports_systemd_services() and has_conflicting_systemd_units():
         print_systemd_scope_conflict_warning()
+        print()
+
+    if is_macos() and has_conflicting_launchd_services():
+        print_launchd_scope_conflict_warning()
         print()
 
     if supports_systemd_services() and has_legacy_hermes_units():
@@ -7127,7 +7255,9 @@ def _gateway_command_inner(args):
                     service_available = True
                 except subprocess.CalledProcessError:
                     pass
-            elif is_macos() and _launchd_plist_path_for_scope(system).exists():
+            elif is_macos() and _launchd_plist_path_for_scope(
+                _select_launchd_scope(system)
+            ).exists():
                 try:
                     _launchd_stop_for_scope(system)
                     service_available = True
@@ -7160,7 +7290,9 @@ def _gateway_command_inner(args):
                     service_available = True
                 except subprocess.CalledProcessError:
                     pass
-            elif is_macos() and _launchd_plist_path_for_scope(system).exists():
+            elif is_macos() and _launchd_plist_path_for_scope(
+                _select_launchd_scope(system)
+            ).exists():
                 try:
                     _launchd_stop_for_scope(system)
                     service_available = True
@@ -7224,7 +7356,9 @@ def _gateway_command_inner(args):
                     service_stopped = True
                 except subprocess.CalledProcessError:
                     pass
-            elif is_macos() and _launchd_plist_path_for_scope(system).exists():
+            elif is_macos() and _launchd_plist_path_for_scope(
+                _select_launchd_scope(system)
+            ).exists():
                 try:
                     _launchd_stop_for_scope(system)
                     service_stopped = True
@@ -7252,7 +7386,9 @@ def _gateway_command_inner(args):
                 or get_systemd_unit_path(system=True).exists()
             ):
                 systemd_start(system=system)
-            elif is_macos() and _launchd_plist_path_for_scope(system).exists():
+            elif is_macos() and _launchd_plist_path_for_scope(
+                _select_launchd_scope(system)
+            ).exists():
                 _launchd_start_for_scope(system)
             elif is_windows():
                 from hermes_cli import gateway_windows
@@ -7278,7 +7414,9 @@ def _gateway_command_inner(args):
                 service_available = True
             except subprocess.CalledProcessError:
                 pass
-        elif is_macos() and _launchd_plist_path_for_scope(system).exists():
+        elif is_macos() and _launchd_plist_path_for_scope(
+            _select_launchd_scope(system)
+        ).exists():
             service_configured = True
             try:
                 _launchd_restart_for_scope(system)
@@ -7361,9 +7499,7 @@ def _gateway_command_inner(args):
         ):
             systemd_status(deep, system=system, full=full)
             _print_gateway_process_mismatch(snapshot)
-        elif is_macos() and (
-            system or _launchd_plist_path_for_scope(system).exists()
-        ):
+        elif is_macos() and (system or get_installed_launchd_scopes()):
             _launchd_status_for_scope(deep, system)
             _print_gateway_process_mismatch(snapshot)
         elif _windows_service_installed:
