@@ -105,7 +105,7 @@ def build_gateway_parser(
     gateway_start.add_argument(
         "--system",
         action="store_true",
-        help="Target the Linux system-level gateway service",
+        help="Target the system-level gateway service (Linux systemd or macOS LaunchDaemon)",
     )
     gateway_start.add_argument(
         "--all",
@@ -119,7 +119,7 @@ def build_gateway_parser(
     gateway_stop.add_argument(
         "--system",
         action="store_true",
-        help="Target the Linux system-level gateway service",
+        help="Target the system-level gateway service (Linux systemd or macOS LaunchDaemon)",
     )
     gateway_stop.add_argument(
         "--all",
@@ -134,7 +134,7 @@ def build_gateway_parser(
     gateway_restart.add_argument(
         "--system",
         action="store_true",
-        help="Target the Linux system-level gateway service",
+        help="Target the system-level gateway service (Linux systemd or macOS LaunchDaemon)",
     )
     gateway_restart.add_argument(
         "--all",
@@ -155,7 +155,7 @@ def build_gateway_parser(
     gateway_status.add_argument(
         "--system",
         action="store_true",
-        help="Target the Linux system-level gateway service",
+        help="Target the system-level gateway service (Linux systemd or macOS LaunchDaemon)",
     )
     _add_compat_platform_flag(gateway_status)
 
@@ -167,12 +167,12 @@ def build_gateway_parser(
     gateway_install.add_argument(
         "--system",
         action="store_true",
-        help="Install as a Linux system-level service (starts at boot)",
+        help="Install as a system-level service that starts at boot (Linux systemd or macOS LaunchDaemon)",
     )
     gateway_install.add_argument(
         "--run-as-user",
         dest="run_as_user",
-        help="User account the Linux system service should run as",
+        help="User account the system service should run as (Linux systemd or macOS LaunchDaemon)",
     )
     gateway_install.add_argument(
         "--start-now",
@@ -214,7 +214,7 @@ def build_gateway_parser(
     gateway_uninstall.add_argument(
         "--system",
         action="store_true",
-        help="Target the Linux system-level gateway service",
+        help="Target the system-level gateway service (Linux systemd or macOS LaunchDaemon)",
     )
 
     # gateway list
