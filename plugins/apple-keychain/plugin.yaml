@@ -1,0 +1,6 @@
+name: apple-keychain
+version: "0.1.0"
+requires_hermes: ">=0.23.0"
+description: Resolve Hermes provider secrets from macOS Keychain
+config_keys:
+  - secrets.apple_keychain

@@ -1,0 +1,16 @@
+# Per-item references override the source's service, account and keychain.
+# Replace the example paths with the keychains used by the relevant profile.
+secrets:
+  sources: [apple_keychain]
+  apple_keychain:
+    enabled: true
+    service: hermes
+    default_keychain: /Users/example/Library/Keychains/login.keychain-db
+    override_existing: true
+    accounts:
+      - OPENAI_API_KEY
+    items:
+      - env: OTHER_API_KEY
+        service: existing-service
+        account: existing-account
+        keychain: /path/to/existing.keychain-db

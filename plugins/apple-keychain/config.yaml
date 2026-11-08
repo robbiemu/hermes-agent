@@ -1,0 +1,11 @@
+# Example references only. Run `hermes keychain setup` to choose the actual
+# login keychain path and securely enter the secret.
+secrets:
+  apple_keychain:
+    enabled: true
+    service: hermes
+    default_keychain: /Users/example/Library/Keychains/login.keychain-db
+    override_existing: true
+    timeout_seconds: 10
+    accounts:
+      - OPENAI_API_KEY
