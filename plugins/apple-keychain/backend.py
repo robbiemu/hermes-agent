@@ -71,7 +71,7 @@ def _recoveries(lines: list[str]) -> list[Recovery]:
         match = RECOVERY_ENTRY.fullmatch(line)
         if not match:
             raise keychain_error("failure")
-        result.append({"id": match.group(2), "state": cast(Literal["pending", "kept"], match.group(1))})
+        result.append({"id": match.group(2), "state": cast(Literal["preparing", "pending", "kept"], match.group(1))})
     return result
 
 

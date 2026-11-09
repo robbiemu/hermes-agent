@@ -109,7 +109,10 @@ def doctor(args: argparse.Namespace) -> int:
             failed = True
             continue
         for recovery in state.get("recoveries", []):
-            if recovery.get("state") == "pending":
+            if recovery.get("state") == "preparing":
+                print(f"{item['env']}: unfinished preparation; discard it using `hermes keychain recovery list`.")
+                failed = True
+            elif recovery.get("state") == "pending":
                 print(f"{item['env']}: unfinished update; old value saved. Use `hermes keychain recovery list`.")
                 failed = True
             else:
@@ -141,7 +144,11 @@ def recovery(args: argparse.Namespace) -> int:
         found = False
         for item in items:
             for entry in backend.list_recoveries(item):
-                state = "unfinished update; old value saved" if entry.get("state") == "pending" else "saved old value"
+                state = {
+                    "preparing": "unfinished preparation; discard only",
+                    "pending": "unfinished update; old value saved",
+                    "kept": "saved old value",
+                }[entry["state"]]
                 print(f"{item['env']}: {entry['id']} ({state})")
                 found = True
         if not found:
@@ -154,5 +161,5 @@ def recovery(args: argparse.Namespace) -> int:
         print(f"{item['env']}: saved old value restored; the saved copy is retained until discarded.")
     else:
         backend.discard_backup(item, args.recovery_id)
-        print(f"{item['env']}: saved old value discarded; current value unchanged.")
+        print(f"{item['env']}: recovery entry discarded; current value unchanged.")
     return 0

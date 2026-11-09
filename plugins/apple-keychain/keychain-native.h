@@ -24,6 +24,7 @@ void get_value(SecKeychainItemRef item, UInt32 *length, void **data);
 int same_value(SecKeychainItemRef item, const void *data, UInt32 length);
 int same_access(SecAccessRef a, SecAccessRef b);
 SecAccessRef copy_access(SecKeychainItemRef item);
+SecAccessRef access_for_copy(SecAccessRef access);
 SecKeychainItemRef create_item(const char *service, const char *account, const void *data,
                                UInt32 length, SecAccessRef access);
 SecAccessRef new_access(int allow_any);

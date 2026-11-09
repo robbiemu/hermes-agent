@@ -106,10 +106,10 @@ def _select_item(source: dict, old: dict | None, name: str, target: str):
         if old and old.get("keychain") and old != item:
             old_state = backend.probe_item(old, timeout=remaining(deadline_for(source)))
             if old_state.get("recoveries"):
-                print(f"{name}: the current target has saved old values. Restore or discard them before changing the target.", file=sys.stderr)
+                print(f"{name}: the current target has recovery entries. Resolve them before changing the target.", file=sys.stderr)
                 return None
         state = backend.probe_item(item, timeout=remaining(deadline_for(source)))
-        if any(entry.get("state") == "pending" for entry in state.get("recoveries", [])):
+        if any(entry.get("state") in {"preparing", "pending"} for entry in state.get("recoveries", [])):
             print("An unfinished rotation needs recovery before another write.", file=sys.stderr)
             return None
         identity = state.get("keychain_identity")
@@ -138,7 +138,7 @@ def _select_item(source: dict, old: dict | None, name: str, target: str):
 def _recheck_item(item: dict, identity: str, exists: bool, source: dict) -> bool:
     state = backend.probe_item(item, timeout=remaining(deadline_for(source)))
     return (state.get("keychain_identity") == identity and bool(state.get("exists")) == exists
-            and not any(entry.get("state") == "pending" for entry in state.get("recoveries", [])))
+            and not any(entry.get("state") in {"preparing", "pending"} for entry in state.get("recoveries", [])))
 
 
 def _keep_existing(document: dict, source: dict, path: Path, items: list, item: dict, identity: str) -> int:

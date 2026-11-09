@@ -66,12 +66,14 @@ int scan_recoveries(const char *service, int print_items, const char *except_pen
         check(status);
         char *account = item_account(item);
         const char *state = NULL, *id = NULL;
-        if (strncmp(account, "pending-", 8) == 0) { state = "pending"; id = account + 8; }
+        if (strncmp(account, "preparing-", 10) == 0) { state = "preparing"; id = account + 10; }
+        else if (strncmp(account, "pending-", 8) == 0) { state = "pending"; id = account + 8; }
         else if (strncmp(account, "kept-", 5) == 0) { state = "kept"; id = account + 5; }
         if (!state || !valid_uuid(id)) fail("failure");
         if (print_items) printf("RECOVERY %s %s\n", state, id);
-        if (strcmp(state, "pending") == 0 && (!except_pending_id || strcmp(id, except_pending_id) != 0)) {
-            pending = 1;
+        if (strcmp(state, "preparing") == 0 ||
+            (strcmp(state, "pending") == 0 && (!except_pending_id || strcmp(id, except_pending_id) != 0))) {
+            if (!pending) pending = strcmp(state, "preparing") == 0 ? 2 : 1;
             if (!recovery_id[0]) memcpy(recovery_id, id, 37);
         }
         free(account);
@@ -91,13 +93,18 @@ SecKeychainItemRef recovery_item(const char *service, const char *id, int *is_pe
         snprintf(account, sizeof(account), "kept-%s", id);
         item = find_item(target_keychain, service, account);
     }
+    if (!item) {
+        snprintf(account, sizeof(account), "preparing-%s", id);
+        item = find_item(target_keychain, service, account);
+        if (item) *is_pending = 2;
+    }
     if (!item) fail("missing");
     return item;
 }
 
-static void mark_kept(SecKeychainItemRef backup, const char *id) {
+static void mark_state(SecKeychainItemRef backup, const char *state, const char *id) {
     char account[64];
-    snprintf(account, sizeof(account), "kept-%s", id);
+    snprintf(account, sizeof(account), "%s-%s", state, id);
     SecKeychainAttribute attr = {kSecAccountItemAttr, (UInt32)strlen(account), account};
     SecKeychainAttributeList attrs = {1, &attr};
     check(SecKeychainItemModifyAttributesAndData(backup, &attrs, 0, NULL));
@@ -126,11 +133,31 @@ static unsigned char *read_input(UInt32 *length) {
     return data;
 }
 
+static SecKeychainItemRef prepare_placeholder(const char *service, SecAccessRef original_access) {
+    SecAccessRef input_access = access_for_copy(original_access);
+    char account[64];
+    snprintf(account, sizeof(account), "preparing-%s", recovery_id);
+    unsigned char placeholder = 0;
+    SecKeychainItemRef item = create_item(service, account, &placeholder, 1, input_access);
+    CFRelease(input_access);
+    SecAccessRef access = copy_access(item);
+    if (!same_access(original_access, access)) fail("access_mismatch");
+    CFRelease(access);
+    /* Exercise the same value-update path before placing a secret in the item. */
+    placeholder = 1;
+    check(SecKeychainItemModifyAttributesAndData(item, NULL, 1, &placeholder));
+    access = copy_access(item);
+    if (!same_value(item, &placeholder, 1) || !same_access(original_access, access)) fail("access_mismatch");
+    CFRelease(access);
+    return item;
+}
+
 void do_write(const char *service, const char *account, const char *recovery_service_name,
                      int allow_any, int keep_backup, int expected) {
     UInt32 length = 0;
     unsigned char *data = read_input(&length);
-    if (scan_recoveries(recovery_service_name, 0, NULL)) fail("recovery_pending");
+    int blocked = scan_recoveries(recovery_service_name, 0, NULL);
+    if (blocked) fail(blocked == 2 ? "recovery_preparing" : "recovery_pending");
     SecKeychainItemRef original = find_item(target_keychain, service, account);
     if (expected >= 0 && !!original != expected) fail("conflict");
     if (!original) {
@@ -141,16 +168,19 @@ void do_write(const char *service, const char *account, const char *recovery_ser
         CFRelease(created);
         CFRelease(access);
     } else {
+        SecAccessRef old_access = copy_access(original);
+        new_uuid();
+        SecKeychainItemRef backup = prepare_placeholder(recovery_service_name, old_access);
         UInt32 old_length = 0;
         void *old_data = NULL;
         get_value(original, &old_length, &old_data);
-        SecAccessRef old_access = copy_access(original);
-        new_uuid();
-        char backup_account[64];
-        snprintf(backup_account, sizeof(backup_account), "pending-%s", recovery_id);
-        SecKeychainItemRef backup = create_item(recovery_service_name, backup_account, old_data, old_length, old_access);
+        check(SecKeychainItemModifyAttributesAndData(backup, NULL, old_length, old_data));
         SecAccessRef backup_access = copy_access(backup);
         if (!same_value(backup, old_data, old_length) || !same_access(old_access, backup_access)) fail("verify");
+        mark_state(backup, "pending", recovery_id);
+        SecAccessRef pending_access = copy_access(backup);
+        if (!same_access(old_access, pending_access)) fail("verify");
+        CFRelease(pending_access);
         printf("RECOVERY %s\n", recovery_id);
         fflush(stdout);
         unsigned char ack = 0;
@@ -160,8 +190,12 @@ void do_write(const char *service, const char *account, const char *recovery_ser
         if (!same_value(original, data, length)) fail("verify");
         SecAccessRef updated_access = copy_access(original);
         if (!same_access(old_access, updated_access)) fail("verify");
-        if (keep_backup) mark_kept(backup, recovery_id);
-        else check(SecKeychainItemDelete(backup));
+        if (keep_backup) {
+            mark_state(backup, "kept", recovery_id);
+            SecAccessRef kept_access = copy_access(backup);
+            if (!same_value(backup, old_data, old_length) || !same_access(old_access, kept_access)) fail("verify");
+            CFRelease(kept_access);
+        } else check(SecKeychainItemDelete(backup));
         printf("OK updated %s\n", recovery_id);
         if (old_data) SecKeychainItemFreeContent(NULL, old_data);
         CFRelease(updated_access);
@@ -177,14 +211,22 @@ void do_write(const char *service, const char *account, const char *recovery_ser
 void do_restore(const char *service, const char *account, const char *recovery_service_name,
                        const char *id) {
     if (!valid_uuid(id)) fail("invalid");
-    if (scan_recoveries(recovery_service_name, 0, id)) fail("recovery_pending");
+    int blocked = scan_recoveries(recovery_service_name, 0, id);
+    if (blocked) fail(blocked == 2 ? "recovery_preparing" : "recovery_pending");
     int pending = 0;
     SecKeychainItemRef backup = recovery_item(recovery_service_name, id, &pending);
+    if (pending == 2) fail("recovery_preparing");
     memcpy(recovery_id, id, 37);
     SecKeychainItemRef original = find_item(target_keychain, service, account);
     if (!original) fail("missing");
     SecAccessRef original_access = copy_access(original), backup_access = copy_access(backup);
     if (!same_access(original_access, backup_access)) fail("access_mismatch");
+    /* Restores also regenerate the partition; check it with nonsecret data first. */
+    new_uuid();
+    SecKeychainItemRef probe = prepare_placeholder(recovery_service_name, original_access);
+    check(SecKeychainItemDelete(probe));
+    CFRelease(probe);
+    memcpy(recovery_id, id, 37);
     UInt32 length = 0;
     void *data = NULL;
     get_value(backup, &length, &data);
@@ -192,7 +234,12 @@ void do_restore(const char *service, const char *account, const char *recovery_s
     if (!same_value(original, data, length)) fail("verify");
     SecAccessRef after = copy_access(original);
     if (!same_access(original_access, after)) fail("verify");
-    if (pending) mark_kept(backup, id);
+    if (pending) {
+        mark_state(backup, "kept", id);
+        SecAccessRef kept_access = copy_access(backup);
+        if (!same_value(backup, data, length) || !same_access(backup_access, kept_access)) fail("verify");
+        CFRelease(kept_access);
+    }
     puts("OK restored");
     if (data) SecKeychainItemFreeContent(NULL, data);
     CFRelease(after);

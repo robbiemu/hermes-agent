@@ -29,6 +29,7 @@ _ERROR_MESSAGES = {
     "unavailable": "Keychain is unavailable",
     "conflict": "the item changed during the operation; retry",
     "recovery_pending": "a recovery needs attention before another write",
+    "recovery_preparing": "an unfinished preparation must be discarded before another write",
     "access_mismatch": "Keychain access controls changed; the item was not updated",
     "verify": "Keychain read-back failed; check recovery records",
     "failure": "Keychain operation failed; check Keychain access and recovery records",
@@ -91,6 +92,10 @@ def probe_all(items: list[dict], deadline: float, replace: bool, *, require_exis
             raise CommandError("duplicate physical target")
         physical_targets.add(physical_target)
         recoveries = state.get("recoveries", [])
+        if any(entry.get("state") == "preparing" for entry in recoveries):
+            print(f"{item['env']}: an unfinished preparation cannot be restored. "
+                  "Use `hermes keychain recovery list` and discard it first.", file=sys.stderr)
+            raise CommandError("preparing recovery")
         if any(entry.get("state") == "pending" for entry in recoveries):
             print(f"{item['env']}: an unfinished rotation has a saved old value. "
                   "Use `hermes keychain recovery list` and restore or discard it first.", file=sys.stderr)

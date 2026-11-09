@@ -16,7 +16,7 @@ class KeychainTarget(TypedDict):
 
 class Recovery(TypedDict):
     id: str
-    state: Literal["pending", "kept"]
+    state: Literal["preparing", "pending", "kept"]
 
 
 class ProbeResult(TypedDict):
@@ -41,7 +41,7 @@ UUID_PATTERN = r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
 RECOVERY_ID = re.compile(rf"^{UUID_PATTERN}$")
 ERROR_LINE = re.compile(rf"^ERR ([a-z_]+)(?: ({UUID_PATTERN}))?$", re.ASCII)
 RECOVERY_LINE = re.compile(rf"^RECOVERY ({UUID_PATTERN})$", re.ASCII)
-RECOVERY_ENTRY = re.compile(rf"^RECOVERY (pending|kept) ({UUID_PATTERN})$", re.ASCII)
+RECOVERY_ENTRY = re.compile(rf"^RECOVERY (preparing|pending|kept) ({UUID_PATTERN})$", re.ASCII)
 _MESSAGES = {
     "missing": "The Keychain item or recovery backup was not found.",
     "locked": "The target Keychain is locked; unlock it before trying again.",
@@ -50,8 +50,9 @@ _MESSAGES = {
     "invalid": "The Keychain target or value is invalid.",
     "unavailable": "The native Keychain helper is unavailable; install the Xcode Command Line Tools if needed.",
     "recovery_pending": "An unfinished rotation has a recovery backup; restore or discard it before writing.",
+    "recovery_preparing": "An unfinished preparation cannot be restored; discard it before writing.",
     "conflict": "The Keychain item changed since it was checked; repeat the operation.",
-    "access_mismatch": "The item's access controls differ from the backup; the backup was retained.",
+    "access_mismatch": "The item's access controls differ from the recovery entry; check recovery records.",
     "verify": "Keychain verification failed; any recovery backup was retained.",
     "failure": "The Keychain operation failed; any recovery backup was retained.",
 }
