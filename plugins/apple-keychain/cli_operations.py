@@ -3,10 +3,11 @@ from __future__ import annotations
 
 import argparse
 import copy
+import re
 import sys
 
 from . import backend, cli_input, configuration
-from .cli_common import CommandError, deadline_for, error_text, find_item, load_items, print_write_result, probe_all, require_explicit_target, revalidate_targets
+from .cli_common import CommandError, deadline_for, error_text, find_item, load_items, print_write_result, probe_all, profile_command, require_explicit_target, revalidate_targets
 from .cli_setup import ensure_writable, save_mapping
 from .contracts import remaining
 
@@ -54,6 +55,25 @@ def set_secret(args: argparse.Namespace) -> int:
     return 0
 
 
+def _print_cleanup_guidance(path, items: list[dict]) -> None:
+    names = [item["env"] for item in items]
+    supported = [name for name in names if re.fullmatch(r"[A-Z][A-Z0-9_]*", name)]
+    unsupported = [name for name in names if name not in supported]
+    print("\nKeychain access does not verify provider authentication or whether values match. "
+          "Restart Hermes and test a fresh request.\n"
+          "If you no longer need copies of these names in this profile's .env, review the list before running. "
+          "`config unset` also clears related credential and configuration records; "
+          "managed settings stay under Hermes' control.")
+    if supported:
+        command = f"{profile_command(path)} config unset"
+        if len(supported) == 1:
+            print(f"  {command} {supported[0]}")
+        else:
+            print(f"  for name in {' '.join(supported)}; do {command} \"$name\"; done")
+    if unsupported:
+        print(f"No cleanup command shown for {', '.join(unsupported)}; Hermes may treat these as config keys.")
+
+
 def doctor(args: argparse.Namespace) -> int:
     _, source, path, items = load_items()
     print(f"Config: {path}")
@@ -94,6 +114,8 @@ def doctor(args: argparse.Namespace) -> int:
                 failed = True
             else:
                 print(f"{item['env']}: saved old value available in `hermes keychain recovery list`.")
+    if not failed:
+        _print_cleanup_guidance(path, items)
     return int(failed)
 
 

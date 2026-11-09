@@ -9,8 +9,8 @@ import shlex
 import subprocess
 import sys
 
-from . import backend, cli_import, cli_input, configuration, native_build
-from .cli_common import CommandError, deadline_for, find_item, load_items, print_write_result, revalidate_targets
+from . import backend, cli_input, configuration, native_build
+from .cli_common import CommandError, deadline_for, find_item, load_items, print_write_result, profile_command, revalidate_targets
 from .contracts import remaining
 
 
@@ -96,7 +96,7 @@ def _candidate(source: dict, name: str, target: str, service: str, account: str)
     return find_item(candidate_items, name)
 
 
-def _select_item(source: dict, old: dict | None, name: str, target: str, imported: bool):
+def _select_item(source: dict, old: dict | None, name: str, target: str):
     service = old["service"] if old else (source.get("service") or "hermes")
     account = old["account"] if old else name
     while True:
@@ -118,11 +118,9 @@ def _select_item(source: dict, old: dict | None, name: str, target: str, importe
             return None
         if not state.get("exists"):
             return item, False, False, identity
-        replacement = "the value being imported" if imported else "a new value"
-        different = "the imported value" if imported else "the new value"
         choice = cli_input.prompt(
             f"'{item['account']}' already exists in Keychain.\n1. Keep the value already in Keychain\n"
-            f"2. Replace it with {replacement}\n3. Save {different} under a different name\n"
+            "2. Replace it with a new value\n3. Save the new value under a different name\n"
             "Enter 1, 2 or 3: ").strip()
         if choice == "1":
             return item, True, True, identity
@@ -143,7 +141,7 @@ def _recheck_item(item: dict, identity: str, exists: bool, source: dict) -> bool
             and not any(entry.get("state") == "pending" for entry in state.get("recoveries", [])))
 
 
-def _keep_existing(document: dict, source: dict, path: Path, items: list, item: dict, candidate, identity: str) -> int:
+def _keep_existing(document: dict, source: dict, path: Path, items: list, item: dict, identity: str) -> int:
     ensure_writable(document)
     backend.validate_value(backend.read_item(item, timeout=remaining(deadline_for(source))))
     if not cli_input.confirm("Save this reference and keep the existing Keychain value? [y/N]: "):
@@ -156,10 +154,7 @@ def _keep_existing(document: dict, source: dict, path: Path, items: list, item: 
     save_mapping(document, item, config_path=path, set_default=not items)
     revalidate_targets([item], path)
     print(f"{item['env']}: existing Keychain value is readable; reference saved.")
-    secrets = document.get("secrets", {})
-    if candidate and (source.get("override_existing", True) is False
-                      or item["env"] in (secrets.get("preserve_existing") or [])):
-        print("Your settings preserve the existing .env value, which can take priority over the Keychain value.")
+    print(f"Run `{profile_command(path)} keychain doctor` to verify the configured references.")
     return 0
 
 
@@ -187,16 +182,14 @@ def setup(args: argparse.Namespace) -> int:
     if not configuration.valid_env_name(name):
         print("Enter a valid environment variable name.", file=sys.stderr)
         return 1
-    candidate = cli_import.capture(name, path)
-    selected = _select_item(source, find_item(items, name), name, target, candidate is not None)
+    selected = _select_item(source, find_item(items, name), name, target)
     if selected is None:
         return 1
     item, exists, keep, identity = selected
     print(f"Target: {name} <- configured service and account; keychain={target}")
     if keep:
-        return _keep_existing(document, source, path, items, item, candidate, identity)
+        return _keep_existing(document, source, path, items, item, identity)
     ensure_writable(document)
-    imported = candidate is not None and cli_input.confirm(f"Found {name} in your .env. Use it? [Y/n]: ", default=True)
     allow_any = False
     if not exists:
         print("New-item access: the helper and /usr/bin/security are trusted. Other programs can invoke /usr/bin/security.")
@@ -208,15 +201,8 @@ def setup(args: argparse.Namespace) -> int:
     if not cli_input.confirm("Save this reference and write the secret? [y/N]: "):
         print("Cancelled; no changes made.")
         return 1
-    value = candidate.value if imported else cli_input.read_secret(name, False)
+    value = cli_input.read_secret(name, False)
     backend.validate_value(value)
-    if imported:
-        try:
-            if not cli_import.unchanged(candidate):
-                raise ValueError("environment changed")
-        except (OSError, ValueError):
-            print("The profile or .env changed during setup; no secret was written.", file=sys.stderr)
-            return 1
     if not _recheck_item(item, identity, exists, source):
         print("The Keychain target changed during setup; no secret was written.", file=sys.stderr)
         return 1
@@ -233,4 +219,5 @@ def setup(args: argparse.Namespace) -> int:
     sys.stdout.flush()
     result = backend.write_item(item, value, allow_any_app=allow_any, expected_exists=exists)
     print_write_result(name, result, keep_backup=False)
-    return cli_import.maybe_cleanup(candidate, item, saved_document, identity) if imported else 0
+    print(f"Run `{profile_command(path)} keychain doctor` to verify the configured references.")
+    return 0

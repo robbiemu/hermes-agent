@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import shlex
 import sys
 import time
 import uuid
@@ -12,6 +13,12 @@ from .contracts import remaining
 
 class CommandError(Exception):
     """An already-reported user-facing error."""
+
+
+def profile_command(config_path: Path) -> str:
+    home = config_path.parent
+    profile = "" if home.parent.name == "profiles" else " -p default"
+    return f"HERMES_HOME={shlex.quote(str(home))} hermes{profile}"
 
 
 _ERROR_MESSAGES = {

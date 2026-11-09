@@ -381,7 +381,7 @@ int main(int argc, char **argv) {
     assert lock_path.exists()
 
 
-def test_setup_imports_and_removes_active_profile_value(native, tmp_path, monkeypatch, capsys):
+def test_setup_writes_hidden_input_and_preserves_profile_env(native, tmp_path, monkeypatch, capsys):
     import argparse
     import hermes_yaml as yaml
 
@@ -392,17 +392,18 @@ def test_setup_imports_and_removes_active_profile_value(native, tmp_path, monkey
     monkeypatch.setenv("HERMES_HOME", str(home))
     (home / "config.yaml").write_text(yaml.safe_dump({"secrets": {"apple_keychain": {
         "enabled": False, "service": "test-service"}}}), encoding="utf-8")
-    (home / ".env").write_text("TEST_SECRET=synthetic-native-import\nOTHER=preserved\n", encoding="utf-8")
-    answers = iter(["", "TEST_SECRET", "", "n", "y", "y"])
+    sentinel = "TEST_SECRET=synthetic-file\nOTHER=preserved\n"
+    (home / ".env").write_text(sentinel, encoding="utf-8")
+    answers = iter(["", "TEST_SECRET", "n", "y"])
     monkeypatch.setattr(setup.cli_input, "require_interactive", lambda: None)
     monkeypatch.setattr(setup.cli_input, "prompt", lambda message, **kwargs: next(answers))
-    monkeypatch.setattr(setup.cli_input, "read_secret", lambda *args: pytest.fail("unexpected hidden prompt"))
+    monkeypatch.setattr(setup.cli_input, "read_secret", lambda *args: "synthetic-native-input")
     monkeypatch.setattr(setup, "login_keychain", lambda: item["keychain"])
     assert setup.setup(argparse.Namespace(headless=False)) == 0
     actual = dict(item, account="TEST_SECRET")
-    assert backend.read_item(actual) == "synthetic-native-import"
-    assert (home / ".env").read_text(encoding="utf-8") == "OTHER=preserved\n"
+    assert backend.read_item(actual) == "synthetic-native-input"
+    assert (home / ".env").read_text(encoding="utf-8") == sentinel
     config = yaml.safe_load((home / "config.yaml").read_text(encoding="utf-8"))
     assert config["secrets"]["apple_keychain"]["items"][0] == actual
     output = capsys.readouterr()
-    assert "synthetic-native-import" not in output.out + output.err
+    assert "synthetic-native-input" not in output.out + output.err
